@@ -1,0 +1,29 @@
+# Core dependencies
+pygame>=2.0
+
+# Hand gesture control (optional)
+opencv-python>=4.0
+mediapipe>=0.10
+
+# Audio recording
+sounddevice
+soundfile
+
+# OpenAI (Whisper STT, GPT-4 LLM, and TTS)
+openai
+
+# Environment variables
+python-dotenv
+
+# Audio playback
+pydub
+
+# Numeric operations
+numpy
+
+# HeyoBo animated character
+Pillow>=9.0
+
+# Face analysis (requires Python 3.12 or earlier)
+deepface
+tf-keras
