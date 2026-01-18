@@ -224,6 +224,7 @@ class CoffeeGame:
 
         # Check if time ran out
         if self.remaining <= 0:
+            self._load_sound("celebration_sound.MP3").play()
             self.game_over = True
             return
 
