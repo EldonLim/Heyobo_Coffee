@@ -33,8 +33,8 @@ CRITICAL - THE GAME:
 - Example: "[START_GAME] Awesome! Catch those beans and win big!"
 
 CRITICAL - HANDLING CORRECTIONS:
-- If user corrects you about their appearance (wrong gender, wrong shirt color, wrong age, etc.), IMMEDIATELY apologize cutely and acknowledge the correction
-- Examples of corrections: "I'm a guy not a girl", "My shirt is red not blue", "I'm not wearing glasses"
+ - If user corrects you about their appearance (wrong gender, wrong age, etc.), IMMEDIATELY apologize cutely and acknowledge the correction
+ - Examples of corrections: "I'm a guy not a girl", "I'm not wearing glasses"
 - Response style for corrections:
   - "Oops, my camera needs more coffee! Sorry about that, handsome! So, ready for a game?"
   - "My bad! These robot eyes need recalibrating — but YOUR coffee instincts look perfect!"
@@ -146,7 +146,7 @@ def get_personalized_opening(person_traits: dict) -> str:
     Generate a personalized opening line based on person's traits.
     
     Args:
-        person_traits: Dict with keys like 'emotion', 'gender', 'age', 'shirt_color', 'wearing_glasses'
+        person_traits: Dict with keys like 'emotion', 'gender', 'age', 'wearing_glasses'
         
     Returns:
         A personalized opening line from GPT-4
@@ -165,8 +165,6 @@ def get_personalized_opening(person_traits: dict) -> str:
         traits_description.append(f"age group: {person_traits['age']}")
     if person_traits.get("emotion"):
         traits_description.append(f"current mood: {person_traits['emotion']}")
-    if person_traits.get("shirt_color"):
-        traits_description.append(f"wearing a {person_traits['shirt_color']} shirt")
     if person_traits.get("wearing_glasses"):
         traits_description.append("wearing glasses")
     
@@ -179,17 +177,16 @@ def get_personalized_opening(person_traits: dict) -> str:
 Generate ONE personalized, energetic opening line to grab their attention and get them to play your coffee game.
 
 Rules:
-- Reference something about their appearance naturally (shirt color, glasses, mood)
+ - Reference something about their appearance naturally (glasses, mood)
 - Keep it short, punchy, and cute
 - Make it feel personal like you noticed THEM specifically
 - Still be coffee-obsessed and playful
 - Don't be creepy, be charming!
 
 Examples of personalization:
-- If they look tired/sad: “Hey you! You look like you NEED a coffee pick-me-up — want me to help with that?”
-- If wearing blue: "Hey, blue shirt! Looking cool — want to feel even cooler with a coffee deal?"
-- If they look happy: “Ooh, someone’s in a good mood! Want to make it EVEN better with coffee?”
 - If wearing glasses: "Hey smarty! Quick brain teaser for a coffee discount?"
+- If they look tired/sad: “Hey you! You look like you NEED a coffee pick-me-up — want me to help with that?”
+- If they look happy: “Ooh, someone’s in a good mood! Want to make it EVEN better with coffee?”
 
 Generate ONLY the opening line, nothing else."""
 

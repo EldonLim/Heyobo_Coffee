@@ -43,7 +43,10 @@ class PersonAnalyzer:
         
         # Initialize detectors
         self._init_detectors()
-    
+        
+        # Initialize DeepLabV3+ for shirt segmentation
+        self._init_deeplab()
+
     def _download_models(self):
         """Download required models if not present."""
         if not os.path.exists(self.MODEL_PATH):
@@ -70,6 +73,21 @@ class PersonAnalyzer:
         pose_options = vision.PoseLandmarkerOptions(base_options=pose_base_options)
         self.pose_detector = vision.PoseLandmarker.create_from_options(pose_options)
     
+    def _init_deeplab(self):
+        """Initialize DeepLabV3+ model for shirt segmentation."""
+        try:
+            from transformers import AutoImageProcessor, AutoModelForSemanticSegmentation
+            import torch
+            self.deeplab_processor = AutoImageProcessor.from_pretrained("nvidia/segformer-b5-finetuned-ade-640-640")
+            self.deeplab_model = AutoModelForSemanticSegmentation.from_pretrained("nvidia/segformer-b5-finetuned-ade-640-640")
+            self.deeplab_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            self.deeplab_model.to(self.deeplab_device)
+        except Exception as e:
+            import traceback
+            print("DeepLabV3+ initialization failed:")
+            traceback.print_exc()
+            self.deeplab_model = None
+
     @staticmethod
     def _get_color_name(hue, saturation, value):
         """Map HSV values to color name."""
@@ -107,13 +125,44 @@ class PersonAnalyzer:
         return x1, x2, y1, y2
     
     def _detect_shirt_color(self, frame, landmarks, h, w):
-        x1 = x2 = y1 = y2 = None
+        # Use DeepLabV3+ to segment shirt/upper clothes
+        if not hasattr(self, "deeplab_model") or self.deeplab_model is None:
+            print("DeepLabV3+ not available, falling back to HSV method.")
+            return "unknown"
 
-        # --- Try pose-based ROI ---
+        import torch
+        from PIL import Image
+        import cv2
+        import numpy as np
+
+        # Convert BGR to RGB and to PIL Image
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        pil_img = Image.fromarray(rgb)
+        inputs = self.deeplab_processor(images=pil_img, return_tensors="pt")
+        inputs = {k: v.to(self.deeplab_device) for k, v in inputs.items()}
+        with torch.no_grad():
+            outputs = self.deeplab_model(**inputs)
+        logits = outputs.logits
+        upsampled_logits = torch.nn.functional.interpolate(
+            logits,
+            size=pil_img.size[::-1],
+            mode="bilinear",
+            align_corners=False
+        )
+        seg = upsampled_logits.argmax(dim=1)[0].cpu().numpy()
+        print(f"[DEBUG] Segmentation unique values: {np.unique(seg)}")
+
+        # ADE20K class indices for upper clothes/shirt/jacket
+        # 5: 'upper clothes', 6: 'dress', 7: 'coat', 13: 'shirt', 15: 'jacket'
+        shirt_classes = [5, 6, 7, 13, 15]
+        shirt_mask = np.isin(seg, shirt_classes)
+        print(f"[DEBUG] Shirt mask pixel count: {np.sum(shirt_mask)}")
+
+        # Optionally, restrict mask to pose-based ROI
+        x1 = x2 = y1 = y2 = None
         try:
             REQUIRED = [11, 12, 23, 24]
             visible = all(landmarks[i].visibility > 0.5 for i in REQUIRED)
-
             if visible:
                 coords = []
                 for i in REQUIRED:
@@ -121,92 +170,114 @@ class PersonAnalyzer:
                     x = int(np.clip(lm.x * w, 0, w - 1))
                     y = int(np.clip(lm.y * h, 0, h - 1))
                     coords.append((x, y))
-
                 (ls_x, ls_y), (rs_x, rs_y), (lh_x, lh_y), (rh_x, rh_y) = coords
-
                 x1 = max(0, min(ls_x, rs_x))
                 x2 = min(w, max(ls_x, rs_x))
-
                 torso_top = min(ls_y, rs_y)
                 torso_bottom = max(lh_y, rh_y)
-
                 y1 = int(torso_top + (torso_bottom - torso_top) * 0.25)
                 y2 = int(torso_top + (torso_bottom - torso_top) * 0.75)
-
         except Exception:
             pass
-
-        # --- Fallback if pose failed ---
         if x1 is None or x2 - x1 < 30 or y2 - y1 < 30:
             x1, x2, y1, y2 = self._fallback_chest_roi(h, w)
 
-        torso_img = frame[y1:y2, x1:x2]
-        if torso_img.size == 0:
+        # Mask out only the shirt region in the ROI
+        # roi_mask = np.zeros_like(shirt_mask, dtype=bool)
+        # roi_mask[y1:y2, x1:x2] = True
+        # shirt_mask = shirt_mask & roi_mask
+        # [DEBUG] Skipping ROI restriction for shirt mask
+        print("[DEBUG] Skipping ROI restriction for shirt mask, using full shirt mask.")
+
+        if np.sum(shirt_mask) < 10:
+            print("[DEBUG] Shirt mask too small after ROI restriction.")
             return "unknown"
 
-        # --- HSV ---
-        hsv = cv2.cvtColor(torso_img, cv2.COLOR_BGR2HSV)
-        h_ch, s_ch, v_ch = cv2.split(hsv)
+        # Get HSV pixels in shirt mask
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        h_ch, s_ch, v_ch = hsv[:,:,0], hsv[:,:,1], hsv[:,:,2]
+        h_vals = h_ch[shirt_mask]
+        s_vals = s_ch[shirt_mask]
+        v_vals = v_ch[shirt_mask]
 
-        med_h = np.median(h_ch)
-        med_s = np.median(s_ch)
-        med_v = np.median(v_ch)
+        # Filter out low-saturation/low-value pixels
+        color_idx = (s_vals > 40) & (v_vals > 40)
+        if np.sum(color_idx) < 10:
+            print(f"[DEBUG] Not enough color pixels in mask. s>40 & v>40 count: {np.sum(color_idx)}")
+            med_v = np.median(v_vals) if len(v_vals) else 0
+            med_s = np.median(s_vals) if len(s_vals) else 0
+            if med_v < 90:
+                print("[DEBUG] Shirt detected as black (low value)")
+                return "black"
+            if med_v > 160:
+                print("[DEBUG] Shirt detected as white (high value)")
+                return "white"
+            if med_s < 40:
+                print("[DEBUG] Shirt detected as gray (low saturation)")
+                return "gray"
+            return "white"
 
-        print(
-            f"ROI: x({x1},{x2}) y({y1},{y2}) | "
-            f"HSV: {int(med_h)} {int(med_s)} {int(med_v)}"
-        )
-
-        # Variance across ROI
-        v_std = np.std(v_ch)
-        s_std = np.std(s_ch)
-
-        # ==============================
-        # STRONG NEUTRAL DETECTION
-        # ==============================
-
-        # 1️⃣ Black: dark & uniform
-        if med_v < 90 and v_std < 20:
+        # Use 20th percentile for V to better detect dark shirts
+        v_percentile = np.percentile(v_vals[color_idx], 20) if len(v_vals[color_idx]) else 0
+        print(f"[DEBUG] V 20th percentile in mask: {v_percentile}")
+        if v_percentile < 90:
+            print("[DEBUG] Overriding to black due to low V 20th percentile (dark shirt)")
             return "black"
-
-        # 2️⃣ White under shadow / lighting
-        if med_v < 160 and v_std >= 20:
+        
+        # Print S and V percentiles for debugging
+        s_percentile_20 = np.percentile(s_vals[color_idx], 20) if len(s_vals[color_idx]) else 0
+        s_percentile_80 = np.percentile(s_vals[color_idx], 80) if len(s_vals[color_idx]) else 0
+        v_percentile_80 = np.percentile(v_vals[color_idx], 80) if len(v_vals[color_idx]) else 0
+        print(f"[DEBUG] S 20th percentile: {s_percentile_20}, S 80th percentile: {s_percentile_80}, V 80th percentile: {v_percentile_80}")
+        # White shirt override: high V, low S
+        if v_percentile_80 > 200 and s_percentile_80 < 60:
+            print("[DEBUG] Overriding to white due to high V 80th percentile and low S 80th percentile (white shirt)")
             return "white"
 
-        # 3️⃣ Bright white
-        if med_v >= 160:
-            return "white"
+        # Optionally, filter out very high V pixels (likely background/skin)
+        filtered_idx = color_idx & (v_vals < 220)
+        if np.sum(filtered_idx) >= 10:
+            h_main = np.median(h_vals[filtered_idx])
+            s_main = np.median(s_vals[filtered_idx])
+            v_main = np.median(v_vals[filtered_idx])
+            print(f"[DEBUG] HSV median in filtered mask: H={h_main}, S={s_main}, V={v_main}")
+        else:
+            h_main = np.median(h_vals[color_idx])
+            s_main = np.median(s_vals[color_idx])
+            v_main = np.median(v_vals[color_idx])
+            print(f"[DEBUG] HSV median in mask: H={h_main}, S={s_main}, V={v_main}")
 
-        # 4️⃣ Gray
-        if med_s < 40:
+        # Map HSV to color name
+        if s_main < 40:
+            if v_main < 90:
+                print("[DEBUG] Shirt detected as black (final mapping)")
+                return "black"
+            if v_main > 160:
+                print("[DEBUG] Shirt detected as white (final mapping)")
+                return "white"
             return "gray"
-
-
-        # ==============================
-        # COLOR (ONLY IF SAFE)
-        # ==============================
-
-        # If saturation is not strong enough, do NOT trust hue
-        if med_s < 80:
-            return "white"
-
-        # Now hue is allowed
-        if med_h < 10 or med_h > 170:
+        if h_main < 10 or h_main > 170:
+            print("[DEBUG] Shirt detected as red")
             return "red"
-        elif med_h < 25:
+        elif h_main < 25:
+            print("[DEBUG] Shirt detected as orange")
             return "orange"
-        elif med_h < 35:
+        elif h_main < 35:
+            print("[DEBUG] Shirt detected as yellow")
             return "yellow"
-        elif med_h < 85:
+        elif h_main < 85:
+            print("[DEBUG] Shirt detected as green")
             return "green"
-        elif med_h < 130:
+        elif h_main < 130:
+            print("[DEBUG] Shirt detected as blue")
             return "blue"
-        elif med_h < 160:
+        elif h_main < 160:
+            print("[DEBUG] Shirt detected as purple")
             return "purple"
         else:
+            print("[DEBUG] Shirt detected as red (fallback)")
             return "red"
-
-        
+    
     @staticmethod
     def _detect_glasses(face_img):
         """Detect glasses using edge detection in the eye region."""
@@ -261,7 +332,7 @@ class PersonAnalyzer:
             self.trait_history[person_idx] = {
                 "wearing_glasses": [],
                 "gender": [],
-                "shirt_color": [],
+                # "shirt_color": [],  # Removed shirt color
                 "age": [],
                 "emotion": []
             }
@@ -278,7 +349,7 @@ class PersonAnalyzer:
             person_data = {
                 "wearing_glasses": self._get_most_common(history["wearing_glasses"]),
                 "gender": self._get_most_common(history["gender"]),
-                "shirt_color": self._get_most_common(history["shirt_color"]),
+                # "shirt_color": self._get_most_common(history["shirt_color"]),  # Removed shirt color
                 "age": self._get_most_common(history["age"]),
                 "emotion": self._get_most_common(history["emotion"])
             }
@@ -309,14 +380,16 @@ class PersonAnalyzer:
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
         
-        # Detect shirt color from pose
-        if self.frame_count % self.analyze_interval == 0:
-            pose_results = self.pose_detector.detect(mp_image)
-            if pose_results.pose_landmarks:
-                landmarks = pose_results.pose_landmarks[0]
-                shirt_color = self._detect_shirt_color(frame, landmarks, h, w)
-                if shirt_color:
-                    self.current_shirt_color = shirt_color
+        # # Detect shirt color from pose
+        # if self.frame_count % self.analyze_interval == 0:
+        #     pose_results = self.pose_detector.detect(mp_image)
+        #     if pose_results.pose_landmarks:
+        #         landmarks = pose_results.pose_landmarks[0]
+        #         shirt_color = self._detect_shirt_color(frame, landmarks, h, w)
+        #         print(f"[DEBUG] Detected shirt color: {shirt_color}")
+        #         if shirt_color:
+        #             print(f"[DEBUG] Setting current_shirt_color to: {shirt_color}")
+        #             self.current_shirt_color = shirt_color
         
         # Detect faces
         results = self.face_detector.detect(mp_image)
@@ -354,7 +427,7 @@ class PersonAnalyzer:
                             self.current_face_data[i] = {
                                 "wearing_glasses": has_glasses,
                                 "gender": gender.lower(),
-                                "shirt_color": self.current_shirt_color,
+                                # "shirt_color": self.current_shirt_color,  # Removed shirt color
                                 "age": self._get_age_group(age),
                                 "emotion": emotion
                             }
@@ -433,10 +506,10 @@ class PersonAnalyzer:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2)
             
             # Display shirt color
-            shirt_color = person.get("shirt_color", "")
-            if shirt_color:
-                cv2.putText(frame, f"Shirt: {shirt_color}", (x, y2 + 70),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
+            # shirt_color = person.get("shirt_color", "")
+            # if shirt_color:
+            #     cv2.putText(frame, f"Shirt: {shirt_color}", (x, y2 + 70),
+            #                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
         
         return frame
     
